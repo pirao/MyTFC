@@ -1,2 +1,7 @@
 data_modules/__pycache__/__init__.cpython-38.pyc
 data_modules/__pycache__/uci.cpython-38.pyc
+data/uci/preprocessed/train.csv
+transforms/__pycache__/__init__.cpython-38.pyc
+transforms/__pycache__/tfc_augmentations.cpython-38.pyc
+models/__pycache__/__init__.cpython-38.pyc
+models/__pycache__/tfc.cpython-38.pyc
