@@ -22,6 +22,11 @@ from pathlib import Path
 import warnings
 warnings.filterwarnings("ignore")
 
+import sys
+sys.path.append('..')
+sys.path.append('../..')
+from transforms.tfc_utils import *
+from scipy.fft import fft, fftfreq, ifft 
 
 ########################################
 ########################################
@@ -226,7 +231,12 @@ class UCIDataset(Dataset):
                                                   "gyro-y",
                                                   "gyro-z",),
                  target_column: str = "class",
-                 flatten: bool = False):
+                 flatten: bool = False,
+                 
+                 transform=None,
+                 dt=0.02,
+                 training_mode='TFC'): 
+        
         self.parquet_file_path = Path(parquet_file_path)
         self.feature_column_prefixes = feature_column_prefixes
         self.target_column = target_column
@@ -234,10 +244,14 @@ class UCIDataset(Dataset):
 
         logging.debug("Loading data from Parquet file")
         self.data = pd.read_parquet(self.parquet_file_path)
-        logging.debug(f"Data shape: {self.data.shape}")
 
         self.columns_to_select = [self._list_columns_starting_with(self.data, prefix) for prefix in self.feature_column_prefixes]
-        logging.debug(f"Columns to select: {self.columns_to_select}")
+        
+        ########## Extra I added based on seismic.py ##########
+        self.transform = transform
+        self.training_mode = training_mode
+        self.dt = dt
+            
 
     @staticmethod
     def _list_columns_starting_with(df: pd.DataFrame, prefix: str) -> List[str]:
@@ -247,21 +261,45 @@ class UCIDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx: int) -> Tuple[np.ndarray, int]:
-        data = np.zeros(shape=(len(self.columns_to_select), len(self.columns_to_select[0])),dtype=np.float32,)
+        
+        # Initializing the data and freq data
+        data = np.zeros(shape=(len(self.columns_to_select), len(self.columns_to_select[0])), dtype=np.float32)
         
         for channel in range(len(self.columns_to_select)):
             columns = self.columns_to_select[channel]
-            
             if len(columns) == 0:
                 raise ValueError(f"No columns found for prefix {self.feature_column_prefixes[channel]}")
-            
             data[channel, :] = self.data.iloc[idx][columns]
-            
+        
         if self.flatten:
             data = data.flatten()
+        target = int(self.data.iloc[idx][self.target_column]) -1 # Subtracting 1 to make the target 0-based 
         
-        target = self.data.iloc[idx][self.target_column]
-        return data, target
+        
+        if len(data.shape) != 2:
+            raise ValueError(f"Input time_sample must have 2 dimensions (num_sensors, num_timesteps), but got {data.shape}.")
+        
+        
+        if self.transform and self.training_mode == 'TFC':
+            # Compute the normalized amplitude spectrum
+            norm_amplitude_spectrum_dataset = compute_half_spectrum_for_dataset(data, self.dt)
+            norm_full_amplitude_spectrum_dataset = reconstruct_full_spectrum(norm_amplitude_spectrum_dataset)
+            
+            # Apply transformations on the time series and half spectrum
+            _, data_aug_time, norm_amplitude_spectrum_aug = self.transform(data, norm_amplitude_spectrum_dataset) 
+            
+            # Transforming from augmented half spectrum to full spectrum 
+            norm_full_amplitude_spectrum_aug_dataset = reconstruct_full_spectrum(norm_amplitude_spectrum_aug)
+            
+            # Checking time dimension
+            if data_aug_time.shape[-1] != norm_full_amplitude_spectrum_aug_dataset.shape[-1]:
+                print(f"data_aug_time shape: {data_aug_time.shape}")
+                print(f"norm_amplitude_spectrum_aug shape: {norm_full_amplitude_spectrum_aug_dataset.shape}")
+                raise ValueError("The time dimension of data_aug_time should be equal to norm_amplitude_spectrum_aug for full spectrum.")            
+            
+            return data, data_aug_time, norm_full_amplitude_spectrum_dataset, norm_full_amplitude_spectrum_aug_dataset, target
+        else:
+            return data, target
     
     
 class UCIDataModule(L.LightningDataModule):
@@ -269,21 +307,14 @@ class UCIDataModule(L.LightningDataModule):
     Encapsulates the data loading and processing for the HAR dataset using Parquet files.
     """
 
-    def __init__(
-        self,
-        root_data_dir: Union[Path, str],
-        feature_column_prefixes: list = (
-            "accel-x",
-            "accel-y",
-            "accel-z",
-            "gyro-x",
-            "gyro-y",
-            "gyro-z",
-        ),
+    def __init__(self,root_data_dir: Union[Path, str],
+                 feature_column_prefixes: list = ("accel-x","accel-y","accel-z","gyro-x","gyro-y","gyro-z"),
         target_column: str = "class",
         flatten: bool = False,
         batch_size: int = 32,
-    ):
+        transform=None,
+        training_mode='TFC'):
+        
         super().__init__()
         self.root_data_dir = Path(root_data_dir)
         self.feature_column_prefixes = feature_column_prefixes
@@ -295,6 +326,10 @@ class UCIDataModule(L.LightningDataModule):
             "validation": os.path.join(self.root_data_dir, "validation.parquet"),
             "test": os.path.join(self.root_data_dir, "test.parquet"),
         }
+        
+        # Extra I added based on seismic.py
+        self.transform = transform
+        self.training_mode = training_mode
 
     def _get_dataset_dataloader(self, path: Path, shuffle: bool) -> DataLoader:
         """Create a UCIDataset object and return a DataLoader object."""
@@ -303,7 +338,11 @@ class UCIDataModule(L.LightningDataModule):
             feature_column_prefixes=self.feature_column_prefixes,
             target_column=self.target_column,
             flatten=self.flatten,
+            transform=self.transform,
+            training_mode=self.training_mode
         )
+    
+        
         
         dataloader = DataLoader(
             dataset,
@@ -311,6 +350,7 @@ class UCIDataModule(L.LightningDataModule):
             shuffle=shuffle,
             num_workers=0,  # Doesnt work if num_workers > 0
             pin_memory=True,
+            drop_last = True
         )
         
         return dataloader
