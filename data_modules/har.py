@@ -8,6 +8,12 @@ import numpy as np
 import pandas as pd
 from torch.utils.data import DataLoader, Dataset
 
+import sys
+sys.path.append('..')
+sys.path.append('../..')
+from transforms.tfc_utils import *
+from scipy.fft import fft, fftfreq, ifft 
+
 
 class HarDataset(Dataset):
     def __init__(
@@ -23,6 +29,11 @@ class HarDataset(Dataset):
         ),
         target_column: str = "standard activity code",
         flatten: bool = False,
+        
+        transform=None, # Parts added for TFC
+        dt=0.02,
+        training_mode='TFC'
+        
     ):
         """Define the dataloaders for train, validation and test splits for
         HAR datasets. This datasets assumes that data is stored as a single CSV
@@ -120,6 +131,11 @@ class HarDataset(Dataset):
             self._list_columns_starting_with(self.data, prefix)
             for prefix in self.feature_column_prefixes
         ]
+        
+        ########## Extra parts I added for TF-C to work ##########
+        self.transform = transform
+        self.training_mode = training_mode
+        self.dt = dt
 
     @staticmethod
     def _list_columns_starting_with(df: pd.DataFrame, prefix: str) -> List[str]:
@@ -146,15 +162,40 @@ class HarDataset(Dataset):
             shape=(len(self.columns_to_select), len(self.columns_to_select[0])),
             dtype=np.float32,
         )
+        
         for channel in range(len(self.columns_to_select)):
-            data[channel, :] = self.data.iloc[idx][
-                self.columns_to_select[channel]
-            ]
+            columns = self.columns_to_select[channel]
+            data[channel, :] = self.data.iloc[idx][columns]
+            
         if self.flatten:
             data = data.flatten()
-        
         target = self.data.iloc[idx][self.target_column]
-        return data, target
+        
+        #print(f"Index: {idx}, Data shape: {data.shape}, Target: {target}")
+        
+        # Part added for my TFC implementation
+        if self.transform and self.training_mode == 'TFC':
+    
+            # Compute the normalized amplitude spectrum
+            norm_amplitude_spectrum_dataset = compute_half_spectrum_for_dataset(data, self.dt)
+            norm_full_amplitude_spectrum_dataset = reconstruct_full_spectrum(norm_amplitude_spectrum_dataset)
+            
+            # Apply transformations on the time series and half spectrum
+            _, data_aug_time, norm_amplitude_spectrum_aug = self.transform(data, norm_amplitude_spectrum_dataset) 
+            
+            # Transforming from augmented half spectrum to full spectrum 
+            norm_full_amplitude_spectrum_aug_dataset = reconstruct_full_spectrum(norm_amplitude_spectrum_aug)
+            
+            # Checking time dimension
+            if data_aug_time.shape[-1] != norm_full_amplitude_spectrum_aug_dataset.shape[-1]:
+                print(f"data_aug_time shape: {data_aug_time.shape}")
+                print(f"norm_amplitude_spectrum_aug shape: {norm_full_amplitude_spectrum_aug_dataset.shape}")
+                raise ValueError("The time dimension of data_aug_time should be equal to norm_amplitude_spectrum_aug for full spectrum.")            
+            
+            return data, data_aug_time, norm_full_amplitude_spectrum_dataset, norm_full_amplitude_spectrum_aug_dataset, target
+        else:
+            return data, target   # Original return statement for HAR dataset
+
 
 
 class HarDataModule(L.LightningDataModule):
@@ -175,7 +216,9 @@ class HarDataModule(L.LightningDataModule):
         flatten: bool = False,
         # DataLoader parameters
         batch_size: int = 32,
-    ):
+        transform=None,
+        training_mode='TFC'):
+        
         """Encapsulates the data loading and processing for the HAR dataset.
         This class is a subclass of `LightningDataModule` and implements the
         `train_dataloader`, `val_dataloader` and `test_dataloader` methods.
@@ -244,6 +287,10 @@ class HarDataModule(L.LightningDataModule):
 
         }
         self.setup()
+        
+        # Extra I added based on TFC
+        self.transform = transform
+        self.training_mode = training_mode
 
     def setup(self, stage:str = None) -> None:
         # Verify that the data is available. If not, fectch and unzip dataset
@@ -251,6 +298,8 @@ class HarDataModule(L.LightningDataModule):
             if not os.path.exists(v):
                 print(v,"file is missing")
                 self.fetch_and_unzip_dataset()
+            else:
+                print(v, "file exists and has", sum(1 for line in open(v)), "lines")
 
     def fetch_and_unzip_dataset(self) -> None:
 
@@ -286,34 +335,36 @@ class HarDataModule(L.LightningDataModule):
             DataLoader object with the HarDataset of the given CSV file
         """
         dataset = HarDataset(
-            path,
+            csv_file_path=path,
             feature_column_prefixes=self.feature_column_prefixes,
             target_column=self.target_column,
             flatten=self.flatten,
+            transform=self.transform,
+            training_mode=self.training_mode
         )
+        
+        
+        # print(f"Dataset length for {path}: {len(dataset)}")
+        
         dataloader = DataLoader(
             dataset,
             batch_size=self.batch_size,
             shuffle=shuffle,
-            num_workers=1,
+            num_workers=1,  # I added this for TFC. Was previously 1    
+            drop_last = True, # Have to do this for TFC
+            pin_memory=True,  # I added this for TFC
         )
         return dataloader
     
     def train_dataloader(self):
-        dataloader = self._get_dataset_dataloader(
-            self.root_data_dir / "train.csv", shuffle=True
-        )
+        dataloader = self._get_dataset_dataloader(self.root_data_dir / "train.csv", shuffle=True,persistent_workers=True) # Added persistent_workers=True
         return dataloader
     
     def val_dataloader(self):
-        dataloader = self._get_dataset_dataloader(
-            self.root_data_dir / "validation.csv", shuffle=False
-        )
+        dataloader = self._get_dataset_dataloader(self.root_data_dir / "validation.csv", shuffle=False,persistent_workers=True) # Added persistent_workers=True
         return dataloader
     
     def test_dataloader(self):
-        dataloader = self._get_dataset_dataloader(
-            self.root_data_dir / "test.csv", shuffle=False
-        )
+        dataloader = self._get_dataset_dataloader(self.root_data_dir / "test.csv", shuffle=False,persistent_workers=True) # Added persistent_workers=True
         return dataloader
 

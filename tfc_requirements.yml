@@ -1,4 +1,4 @@
-name: ame
+name: tfc
 channels:
   - pytorch
   - nvidia
