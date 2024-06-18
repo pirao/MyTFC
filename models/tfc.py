@@ -4,7 +4,8 @@ import numpy as np
 import lightning as L
 from lightning.pytorch.callbacks import ModelCheckpoint, Callback, EarlyStopping
 from lightning.pytorch.loggers import TensorBoardLogger
-import pytorch_lightning as pl
+import os
+# import pytorch_lightning as LightningModule
 
 import torchmetrics
 import torch.nn as nn
@@ -18,7 +19,8 @@ from config_files.TFC_Configs import GlobalConfigFile
 ######################
 # TFC model
 #######################
-class TFC_Backbone(nn.Module): 
+
+class TFC_Backbone(L.LightningModule): 
     def __init__(self, global_config: GlobalConfigFile, log_metrics=True):
         super(TFC_Backbone, self).__init__()
 
@@ -32,7 +34,7 @@ class TFC_Backbone(nn.Module):
         self.val_loss_freq_enc = []
         self.train_loss_consist = []
         self.val_loss_consist = []
-        self.initial_validation = True
+        # self.initial_validation = True
         
         configs = global_config.enc_config
         loss_config = global_config.loss_config
@@ -223,10 +225,30 @@ class TFC_Backbone(nn.Module):
         S_T_Faug = self.nt_xent_criterion(z_time, z_freq_aug)
         S_Taug_Faug = self.nt_xent_criterion(z_time_aug, z_freq_aug)
 
-        constant = 1
+        constant = 10
         loss_consistency = (S_T_F - S_T_Faug + constant) + (S_T_F - S_Taug_F + constant) + (S_T_F - S_Taug_Faug + constant)
 
-        # Ensure non-negative consistency loss (don't know why this bug happens, but it does)
+        
+        # Prints for debugging. Uncomment if running notebook 1
+        # print("\n" + "-"*25)
+        # print("First Consistency Loss Term:")
+        # print(f"(S_T_F - S_T_Faug + constant):\n{S_T_F - S_T_Faug + constant}")
+        # print("-"*25)
+
+        # print("Second Consistency Loss Term:")
+        # print(f"(S_T_F - S_Taug_F + constant):\n{S_T_F - S_Taug_F + constant}")
+        # print("-"*25)
+
+        # print("Third Consistency Loss Term:")
+        # print(f"(S_T_F - S_Taug_Faug + constant):\n{S_T_F - S_Taug_Faug + constant}")
+        # print("-"*25)
+
+        # print("Total Consistency Loss Term:")
+        # print(f"loss_consistency:\n{loss_consistency}")
+        # print("-"*25 + "\n")
+        
+        ## Comment if running notebook 1
+        ## Ensure non-negative consistency loss (don't know why this gives me negative loss, but it does. 
         loss_consistency = torch.clamp(loss_consistency, min=0.0)
         
         # Combining all the loss terms
@@ -287,9 +309,6 @@ class TFC_Backbone(nn.Module):
 
 
     def on_validation_epoch_end(self):
-        if self.initial_validation:
-            self.initial_validation = False
-            return
         avg_loss = self.trainer.callback_metrics['val_loss_total']
         avg_loss_time_enc = self.trainer.callback_metrics['val_loss_time_enc']
         avg_loss_freq_enc = self.trainer.callback_metrics['val_loss_freq_enc']
@@ -306,7 +325,6 @@ class TFC_Backbone(nn.Module):
         """
         for param in self.parameters():
             param.requires_grad = False
-        self.check_if_frozen()
         
 
     def unfreeze_weights(self):
@@ -329,7 +347,7 @@ class TFC_Backbone(nn.Module):
 
 
 #########################################
-# TFC Projector Head
+# TFC Projector Head (Or Prediction Head)
 #########################################
 
 class TFC_Projector_Head(L.LightningModule):
@@ -386,11 +404,6 @@ class TFC_Projector_Head(L.LightningModule):
                                      weight_decay=self.optimizer_config.weight_decay)
         return optimizer
 
-
-
-##########################################  
-# TFC Prediction Head
-##########################################
 
 
 ##############################################
@@ -742,10 +755,41 @@ class NTXentLoss(nn.Module):
 ###############################
 # Callbacks 
 ###############################
-
-# Callbacks and Logger Configuration
+    
 class TFCCallbacks:
-    def __init__(self, monitor='val_loss_total', min_delta=0.001, patience=5, verbose=True, log_dir='lightning_logs', experiment_name='tfc_experiment', version=0):
+    """
+    A class to set up and manage callbacks for a PyTorch Lightning training process, 
+    including early stopping, model checkpointing, and TensorBoard logging.
+
+    Attributes:
+        monitor (str): Metric to monitor for early stopping and checkpointing.
+        min_delta (float): Minimum change in the monitored metric to qualify as an improvement.
+        patience (int): Number of epochs with no improvement after which training will be stopped.
+        verbose (bool): If True, prints a message for each validation improvement.
+        log_dir (str): Directory to save logs and checkpoints.
+        experiment_name (str): Name of the experiment.
+        version (int): Version of the experiment.
+        SSL_technique_prefix (str): Prefix for checkpoint filenames.
+        experiment_path (str): Path to the experiment directory.
+        checkpoint_path (str): Path to the checkpoint directory.
+        tensorboard_path (str): Path to the TensorBoard log directory.
+    """
+    
+    def __init__(self, monitor='val_loss_total', min_delta=0.001, patience=5, verbose=True,
+                 log_dir='lightning_logs', experiment_name='tfc_experiment', version=0, SSL_technique_prefix='TF_C'):
+        """
+        Initializes the TFCCallbacks with the given parameters and ensures the directory structure exists.
+
+        Args:
+            monitor (str): Metric to monitor for early stopping and checkpointing.
+            min_delta (float): Minimum change in the monitored metric to qualify as an improvement.
+            patience (int): Number of epochs with no improvement after which training will be stopped.
+            verbose (bool): If True, prints a message for each validation improvement.
+            log_dir (str): Directory to save logs and checkpoints.
+            experiment_name (str): Name of the experiment.
+            version (int): Version of the experiment.
+            SSL_technique_prefix (str): Prefix for checkpoint filenames.
+        """
         self.monitor = monitor
         self.min_delta = min_delta
         self.patience = patience
@@ -753,21 +797,51 @@ class TFCCallbacks:
         self.log_dir = log_dir
         self.experiment_name = experiment_name
         self.version = version
+        self.SSL_technique_prefix = SSL_technique_prefix
+
+        # Define paths for the experiment
+        self.experiment_path = f"{self.log_dir}/{self.experiment_name}/{self.version}"
+        self.checkpoint_path = os.path.join(self.experiment_path, 'checkpoints')
+        self.tensorboard_path = os.path.join(self.experiment_path, 'tensorboard')
+
+        # Ensure directories exist
+        os.makedirs(self.checkpoint_path, exist_ok=True)
+        os.makedirs(self.tensorboard_path, exist_ok=True)
 
     def get_callbacks(self):
-        early_stopping = EarlyStopping(monitor=self.monitor, 
-                                       min_delta=self.min_delta, 
-                                       patience=self.patience,
-                                       verbose=self.verbose)
+        """
+        Creates and returns the early stopping and model checkpoint callbacks.
+
+        Returns:
+            list: A list containing the early stopping and model checkpoint callbacks.
+        """
+        early_stopping = EarlyStopping(
+            monitor=self.monitor,
+            min_delta=self.min_delta,
+            patience=self.patience,
+            verbose=self.verbose
+        )
         
-        checkpoint = ModelCheckpoint(monitor=self.monitor, 
-                                     save_top_k=1, 
-                                     mode='min',
-                                     dirpath=f"{self.log_dir}/{self.experiment_name}",
-                                     filename='{epoch}-{val_loss_total:.2f}',
-                                     save_weights_only=True)
+        checkpoint = ModelCheckpoint(
+            monitor=self.monitor,
+            save_top_k=1,
+            mode='min',
+            dirpath=self.checkpoint_path,
+            filename=f'{self.SSL_technique_prefix}-model' + '-{epoch}-{train_loss_total:.2f}',
+            save_weights_only=True
+        )
         
         return [early_stopping, checkpoint]
 
     def get_logger(self):
-        return TensorBoardLogger(save_dir=self.log_dir, name=self.experiment_name, version=self.version)
+        """
+        Creates and returns the TensorBoard logger.
+
+        Returns:
+            TensorBoardLogger: The TensorBoard logger.
+        """
+        return TensorBoardLogger(
+            save_dir=self.tensorboard_path,
+            name='',
+            version=''
+        )

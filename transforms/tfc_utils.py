@@ -10,6 +10,10 @@ import sys
 sys.path.append('../')
 from transforms.tfc_augmentations import *
 
+
+from sklearn.manifold import TSNE
+from sklearn.metrics import classification_report, precision_score, f1_score, confusion_matrix
+
 ################################
 # Random seed
 ################################
@@ -365,8 +369,113 @@ def aug_freq_and_plot_freq_time_domain(data, unique_classes, sensors, operation=
     plt.subplots_adjust(top=0.85)
     plt.show()
     
+
+def plot_backbone_metrics(model):
+    """
+    Plots the training and validation metrics for the given model.
     
+    Parameters:
+    - model: The model containing the training and validation logs.
     
+    This function creates a 3x3 grid of subplots showing the following metrics:
+    1. Backbone Time Encoder Loss (Training and Validation)
+    2. Backbone Freq Encoder Loss (Training and Validation)
+    3. Backbone Cross-Modal Loss (Training and Validation)
+    4. Total Loss (Training and Validation)
+    """
+    fig, axs = plt.subplots(2, 2, figsize=(15, 10), sharex=False)
+    ax = axs.ravel()
+
+    epochs = np.arange(1, len(model.train_loss_time_enc) + 1, 1)
+
+    # Backbone loss components. Their sum results in the backbone total loss
+
+    ax[0].plot(epochs, model.train_loss_time_enc, label="Training")
+    ax[0].plot(epochs, model.val_loss_time_enc, label="Validation")
+    ax[0].set_xlabel("Epochs")
+    ax[0].set_ylabel("Loss")
+    ax[0].set_title('Backbone Time Encoder')
+    ax[0].legend()
+
+    ax[1].plot(epochs, model.train_loss_freq_enc, label="Training")
+    ax[1].plot(epochs, model.val_loss_freq_enc, label="Validation")
+    ax[1].set_xlabel("Epochs")
+    ax[1].set_ylabel("Loss")
+    ax[1].set_title('Backbone Freq Encoder')
+    ax[1].legend()
+
+    ax[2].plot(epochs, model.train_loss_consist, label="Training")
+    ax[2].plot(epochs, model.val_loss_consist, label="Validation")
+    ax[2].set_xlabel("Epochs")
+    ax[2].set_ylabel("Loss")
+    ax[2].set_title('Backbone Cross-Modal')
+    ax[2].legend()
+
+    # The backbone loss is a decimal constant that weighs the importance of the encoder loss and the consistency loss. 
+    # Thats why its lower than the other two
+    ax[3].plot(epochs, model.train_losses, label="Training")
+    ax[3].plot(epochs, model.val_losses, label="Validation")
+    ax[3].set_xlabel("Epochs")
+    ax[3].set_ylabel("Loss")
+    ax[3].set_title('Backbone Loss')
+    ax[3].legend()
+
+
+    plt.tight_layout()
+    plt.show()
+
+def plot_head_metrics(model):
+    """
+    Plots the training and validation metrics for the given model.
+    
+    Parameters:
+    - model: The model containing the training and validation logs.
+    
+    This function creates a 3x3 grid of subplots showing the following metrics:
+    1. Projection Head Loss (Training and Validation)
+    2. Accuracy (Training and Validation)
+    3. Recall (Training and Validation)
+    4. F1 Score (Training and Validation)
+    """
+    fig, axs = plt.subplots(2, 2, figsize=(15, 10), sharex=False)
+    ax = axs.ravel()
+
+    epochs = np.arange(1, len(model.val_loss_log) + 1, 1)
+
+    ax[0].plot(epochs, model.train_loss_proj_head, label="Training")
+    ax[0].plot(epochs, model.val_loss_proj_head, label="Validation")
+    ax[0].set_xlabel("Epochs")
+    ax[0].set_ylabel("Loss")
+    ax[0].set_title('Projection Head Loss')
+    ax[0].legend()
+
+    ### Metrics for Backbone + Projection Head
+
+    ax[1].plot(epochs, model.train_accuracy_log, label="Training")
+    ax[1].plot(epochs, model.val_accuracy_log, label="Validation")
+    ax[1].set_xlabel("Epochs")
+    ax[1].set_ylabel("Accuracy")
+    ax[1].set_title('Backbone + Projection Head')
+    ax[1].legend()
+
+    ax[2].plot(epochs, model.train_recall_log, label="Training")
+    ax[2].plot(epochs, model.val_recall_log, label="Validation")
+    ax[2].set_xlabel("Epochs")
+    ax[2].set_ylabel("Recall")
+    ax[2].set_title('Backbone + Projection Head')
+    ax[2].legend()
+
+    ax[3].plot(epochs, model.train_f1_log, label="Training")
+    ax[3].plot(epochs, model.val_f1_log, label="Validation")
+    ax[3].set_xlabel("Epochs")
+    ax[3].set_ylabel("F1 metric")
+    ax[3].set_title('Backbone + Projection Head')
+    ax[3].legend()
+
+    plt.tight_layout()
+    plt.show()
+
+
 def plot_model_metrics(model):
     """
     Plots the training and validation metrics for the given model.
@@ -464,3 +573,88 @@ def plot_model_metrics(model):
 
     plt.tight_layout()
     plt.show()
+    
+    
+    
+    
+
+def extract_latent_representations(model, dataloader, device):
+    model.to(device)
+    model.eval()
+    time_latents = []
+    freq_latents = []
+    labels = []
+    preds = []
+
+    with torch.no_grad():
+        for batch in dataloader:
+            time_data, time_aug_data, freq_data, freq_aug_data, batch_labels = batch
+            time_data, freq_data = time_data.to(device), freq_data.to(device)
+            h_time, z_time, h_freq, z_freq = model.backbone(time_data, freq_data)
+            h_combined = torch.cat((z_time, z_freq), dim=1)
+            predictions = model.projection_head(h_combined)
+            _, predicted_labels = torch.max(predictions, 1)
+            
+            time_latents.append(h_time.cpu().numpy())
+            freq_latents.append(h_freq.cpu().numpy())
+            labels.append(batch_labels.cpu().numpy()[:len(time_data)])
+            preds.append(predicted_labels.cpu().numpy())
+    
+    return (np.concatenate(time_latents), 
+            np.concatenate(freq_latents), 
+            np.concatenate(labels), 
+            np.concatenate(preds))
+
+def visualize_tsne(time_latents, freq_latents, labels,label_mapping,perplexity=30):
+
+    tsne = TSNE(n_components=2,perplexity=perplexity)
+
+    time_tsne = tsne.fit_transform(time_latents)
+    freq_tsne = tsne.fit_transform(freq_latents)
+
+    unique_labels = list(set(labels))
+    num_classes = len(unique_labels)
+    cmap = plt.get_cmap('tab10', num_classes)
+
+    fig, axs = plt.subplots(2, 1, figsize=(16, 12))
+
+    # Plot for Time Encoder Latent Space
+    scatter = axs[0].scatter(time_tsne[:, 0], time_tsne[:, 1], c=labels, cmap=cmap)
+    axs[0].set_title('Time Encoder Latent Space')
+    cbar = plt.colorbar(scatter, ax=axs[0], ticks=range(num_classes))
+    cbar.set_ticks(range(num_classes))
+    cbar.set_ticklabels([label_mapping[label] for label in unique_labels])
+
+    # Plot for Frequency Encoder Latent Space
+    scatter = axs[1].scatter(freq_tsne[:, 0], freq_tsne[:, 1], c=labels, cmap=cmap)
+    axs[1].set_title('Frequency Encoder Latent Space')
+    cbar = plt.colorbar(scatter, ax=axs[1], ticks=range(num_classes))
+    cbar.set_ticks(range(num_classes))
+    cbar.set_ticklabels([label_mapping[label] for label in unique_labels])
+
+    plt.tight_layout()
+    plt.show()
+    
+    
+def plot_confusion_matrix(y_true, y_pred, label_mapping):
+    """
+    Plot the confusion matrix with improved label readability.
+
+    Parameters:
+    - y_true: Array of true labels.
+    - y_pred: Array of predicted labels.
+    - label_mapping: Dictionary mapping numerical labels to string labels.
+    """
+    cm = confusion_matrix(y_true, y_pred)
+    labels = list(label_mapping.values())
+
+    plt.figure(figsize=(12, 8))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=labels, yticklabels=labels)
+    plt.xlabel('Predicted Value')
+    plt.ylabel('True Value')
+    plt.title('Confusion Matrix')
+    
+    plt.xticks(rotation=45, ha="right")
+    plt.tight_layout()
+    plt.show()
+    
