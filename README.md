@@ -23,12 +23,12 @@ If you don't know how to use Containers in VSCode, you can follow the instructio
 Once inside the container, you can install the dependencies, running the following command:
 
 ```bash
-pip install -r requirements.txt
+pip install -r tfc_requirements.txt
 ```
 
 ## Running the example code
 
-To run the example code, you must change into the `best_results/seismic/` directory and run the following commands:
+To run the example code, you must change into the `best_results/HAR/` directory and run the following commands:
 
 ```bash
 python BT_pretrain.py  
@@ -37,9 +37,7 @@ python BT_evaluate.py
 ```
 ## Authors
 
-- [Otávio Napoli](https://github.com/otavioon)
-- [Edson Borin](https://github.com/eborin)
-- [Gabriel Gutierrez](https://github.com/gabrielbg0)
+- [Arthur Pires ](https://github.com/pirao)
 
 ## License
 
